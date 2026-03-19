@@ -296,7 +296,14 @@ async function doJoin(){
 
 // ── Connect ──────────────────────────────────────────────────
 async function connect(token){
-  const wsUrl=`ws://${location.hostname}:7880`;
+  let wsUrl;
+  try {
+    const cr = await fetch('/api/config');
+    const cd = await cr.json();
+    wsUrl = cd.livekit_url;
+  } catch {
+    wsUrl = `ws://${location.hostname}:7880`;
+  }
   room=new Room({
     adaptiveStream:true,dynacast:true,
     audioCaptureDefaults:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}

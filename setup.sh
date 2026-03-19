@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# =============================================================
-#  setup.sh — VoiceChat: Rust backend + LiveKit + systemd
-#  Без Docker, без Node.js, без nginx — всё в одном бинарнике
-#  sudo bash setup.sh
-# =============================================================
+# =====================================================================
+#  setup.sh — VoiceChat: Rust + LiveKit + Caddy (TLS) + systemd
+#  sudo bash setup.sh chat.example.com admin@example.com
+# =====================================================================
 set -euo pipefail
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'
@@ -12,9 +11,9 @@ ok()   { echo -e "${GRN}✓${NC} $*"; }
 fail() { echo -e "${RED}✗${NC} $*"; exit 1; }
 info() { echo -e "${BLU}→${NC} $*"; }
 warn() { echo -e "${YEL}⚠${NC} $*"; }
-hdr()  { echo -e "\n${WHT}▶ $*${NC}"; }
+hdr()  { echo -e "\n${WHT}━━ $* ━━${NC}"; }
 
-[[ $EUID -eq 0 ]] || fail "Нужен root: sudo bash setup.sh"
+[[ $EUID -eq 0 ]] || fail "Запусти с sudo"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/vchat"
@@ -22,63 +21,81 @@ LIVEKIT_VER="1.8.2"
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
-# ── Cargo ─────────────────────────────────────────────────────
-hdr "Rust toolchain"
+DOMAIN="${1:-}"
+EMAIL="${2:-}"
+
+if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
+  echo "Использование: sudo bash setup.sh <домен> <email>"
+  echo "Пример:        sudo bash setup.sh chat.example.com admin@example.com"
+  echo "Dev-режим:     sudo bash setup.sh localhost admin@local.dev"
+  exit 1
+fi
+
+DEV_MODE=0
+[[ "$DOMAIN" == "localhost" || "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && DEV_MODE=1
+
+# ── Cargo ────────────────────────────────────────────────────
+hdr "Rust"
 CARGO=""
 for p in "$REAL_HOME/.cargo/bin/cargo" /usr/local/bin/cargo /usr/bin/cargo; do
   [[ -x "$p" ]] && { CARGO="$p"; break; }
 done
-[[ -n "$CARGO" ]] || fail "Cargo не найден. Установи Rust: https://rustup.rs"
-ok "$($CARGO --version)"
+[[ -n "$CARGO" ]] || fail "Cargo не найден. Установи: curl https://sh.rustup.rs | sh"
+ok "$(sudo -u "$REAL_USER" "$CARGO" --version 2>/dev/null || "$CARGO" --version)"
 
-# ── Сборка ────────────────────────────────────────────────────
-hdr "Сборка vchat (Rust)"
+# ── Сборка ───────────────────────────────────────────────────
+hdr "Сборка vchat"
 pushd "$SCRIPT_DIR/token-server" > /dev/null
-sudo -u "$REAL_USER" "$CARGO" build --release 2>&1 | grep -E "^error|Compiling vchat|Finished"
-BIN="target/release/vchat"
-[[ -f "$BIN" ]] || fail "Сборка не удалась"
-ok "$(du -sh $BIN | cut -f1) → $BIN"
+sudo -u "$REAL_USER" "$CARGO" build --release 2>&1 | grep -E "^error|Compiling vchat|Finished" || true
+[[ -f "target/release/vchat" ]] || fail "Сборка не удалась"
+ok "$(du -sh target/release/vchat | cut -f1)"
 popd > /dev/null
 
-# ── Установка ────────────────────────────────────────────────
-hdr "Установка файлов"
+# ── LiveKit ──────────────────────────────────────────────────
+hdr "LiveKit v${LIVEKIT_VER}"
 mkdir -p "$INSTALL_DIR"/{bin,log,public}
-install -m 755 "$SCRIPT_DIR/token-server/$BIN" "$INSTALL_DIR/bin/vchat"
-cp -r "$SCRIPT_DIR/public/"* "$INSTALL_DIR/public/"
-ok "Файлы в $INSTALL_DIR"
-
-# ── LiveKit ───────────────────────────────────────────────────
-hdr "LiveKit Server v${LIVEKIT_VER}"
-if [[ -f "$INSTALL_DIR/bin/livekit-server" ]]; then
-  ok "Уже установлен"
-else
-  ARCH=$(uname -m); case "$ARCH" in x86_64) LA="amd64";; aarch64) LA="arm64";; *) fail "Неизвестная архитектура: $ARCH";; esac
-  LK_URL="https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VER}/livekit_${LIVEKIT_VER}_linux_${LA}.tar.gz"
-  info "Скачиваем..."
+if [[ ! -f "$INSTALL_DIR/bin/livekit-server" ]]; then
+  ARCH=$(uname -m); case "$ARCH" in x86_64) LA="amd64";; aarch64) LA="arm64";; *) fail "Неизвестная архитектура";; esac
   TMP=$(mktemp -d)
-  curl -L --progress-bar "$LK_URL" | tar xz -C "$TMP"
+  curl -L --progress-bar "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VER}/livekit_${LIVEKIT_VER}_linux_${LA}.tar.gz" | tar xz -C "$TMP"
   install -m 755 "$TMP/livekit-server" "$INSTALL_DIR/bin/livekit-server"
-  rm -rf "$TMP"
-  ok "livekit-server установлен"
+  rm -rf "$TMP"; ok "livekit-server установлен"
+else
+  ok "Уже установлен"
 fi
 
+# ── Caddy ────────────────────────────────────────────────────
+hdr "Caddy"
+if ! command -v caddy &>/dev/null; then
+  info "Устанавливаем Caddy..."
+  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https -q 2>/dev/null || true
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+  apt-get update -q && apt-get install caddy -y -q
+fi
+ok "Caddy $(caddy version)"
+
+# ── Файлы ────────────────────────────────────────────────────
+hdr "Файлы"
+install -m 755 "$SCRIPT_DIR/token-server/target/release/vchat" "$INSTALL_DIR/bin/vchat"
+cp -r "$SCRIPT_DIR/public/"* "$INSTALL_DIR/public/"
+ok "Скопированы"
+
 # ── Секрет ───────────────────────────────────────────────────
-hdr "Секретный ключ"
+hdr "Ключ"
 SECRET_FILE="$INSTALL_DIR/secret"
 if [[ ! -f "$SECRET_FILE" ]]; then
   tr -dc 'a-f0-9' < /dev/urandom | head -c 64 > "$SECRET_FILE"
-  chmod 600 "$SECRET_FILE"
-  ok "Сгенерирован новый секрет"
+  chmod 600 "$SECRET_FILE"; ok "Сгенерирован"
 else
-  ok "Используем существующий"
+  ok "Существующий"
 fi
 SECRET=$(cat "$SECRET_FILE")
 
-# ── Конфиг LiveKit ────────────────────────────────────────────
-hdr "Конфиг LiveKit"
+# ── LiveKit конфиг ───────────────────────────────────────────
+hdr "LiveKit конфиг"
 PUBLIC_IP=$(curl -s --max-time 4 https://api4.my-ip.io/ip 2>/dev/null || curl -s --max-time 4 https://ifconfig.me 2>/dev/null || echo "")
-LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-info "IP: ${LOCAL_IP} → ${PUBLIC_IP:-не определён}"
+LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1 || echo "")
 
 cat > "$INSTALL_DIR/livekit.yaml" << YAML
 port: 7880
@@ -86,7 +103,7 @@ rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: true
-$([ "${PUBLIC_IP:-}" != "${LOCAL_IP:-}" ] && [ -n "${PUBLIC_IP:-}" ] && echo "  external_ip: ${PUBLIC_IP}" || echo "")
+$([ "${PUBLIC_IP:-}" != "${LOCAL_IP:-}" ] && [ -n "${PUBLIC_IP:-}" ] && echo "  external_ip: ${PUBLIC_IP}" || true)
 keys:
   vchat_key: ${SECRET}
 logging:
@@ -96,13 +113,69 @@ room:
   max_participants: 20
   empty_timeout: 300s
 YAML
-ok "livekit.yaml создан"
+ok "livekit.yaml"
 
-# ── systemd: vchat (Rust) ────────────────────────────────────
-hdr "systemd сервисы"
+# ── Caddyfile ────────────────────────────────────────────────
+hdr "Caddyfile"
+mkdir -p /var/log/caddy
+chown caddy:caddy /var/log/caddy 2>/dev/null || true
+
+if [[ $DEV_MODE -eq 1 ]]; then
+  LIVEKIT_WS_URL="ws://${DOMAIN}:7880"
+  cat > /etc/caddy/Caddyfile << CADDYEOF
+http://${DOMAIN} {
+    reverse_proxy /ws/* 127.0.0.1:7880 {
+        header_up Connection {>Connection}
+        header_up Upgrade {>Upgrade}
+    }
+    reverse_proxy /* 127.0.0.1:3000
+    encode gzip
+}
+CADDYEOF
+else
+  LIVEKIT_WS_URL="wss://${DOMAIN}/ws"
+  cat > /etc/caddy/Caddyfile << CADDYEOF
+{
+    email ${EMAIL}
+    admin off
+}
+
+${DOMAIN} {
+    reverse_proxy /ws/* 127.0.0.1:7880 {
+        header_up Host {upstream_hostport}
+        header_up Connection {>Connection}
+        header_up Upgrade {>Upgrade}
+    }
+    reverse_proxy /* 127.0.0.1:3000
+
+    header {
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+
+    encode gzip
+
+    log {
+        output file /var/log/caddy/vchat.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+    }
+}
+CADDYEOF
+fi
+
+caddy validate --config /etc/caddy/Caddyfile && ok "Caddyfile валиден"
+
+# ── systemd ──────────────────────────────────────────────────
+hdr "systemd"
+
 cat > /etc/systemd/system/vchat.service << UNIT
 [Unit]
-Description=VoiceChat API + Static (Rust)
+Description=VoiceChat API (Rust)
 After=network.target
 
 [Service]
@@ -111,7 +184,9 @@ User=nobody
 Group=nogroup
 Environment=LIVEKIT_API_KEY=vchat_key
 Environment=LIVEKIT_API_SECRET=${SECRET}
-Environment=HOST=0.0.0.0
+Environment=LIVEKIT_URL=${LIVEKIT_WS_URL}
+Environment=ALLOWED_ORIGIN=https://${DOMAIN}
+Environment=HOST=127.0.0.1
 Environment=PORT=3000
 Environment=STATIC_DIR=${INSTALL_DIR}/public
 ExecStart=${INSTALL_DIR}/bin/vchat
@@ -124,12 +199,14 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}/log
+MemoryMax=256M
+TasksMax=512
+CPUQuota=80%
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
-# ── systemd: livekit ──────────────────────────────────────────
 cat > /etc/systemd/system/livekit.service << UNIT
 [Unit]
 Description=LiveKit SFU
@@ -150,39 +227,46 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}/log
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now vchat livekit
-ok "Сервисы запущены"
+systemctl enable --now vchat livekit caddy
+ok "Все сервисы запущены"
 
-# ── Firewall ──────────────────────────────────────────────────
-hdr "Порты"
-if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q active; then
-  ufw allow 3000/tcp comment "VoiceChat web" 2>/dev/null || true
-  ufw allow 7880/tcp comment "LiveKit WS"    2>/dev/null || true
-  ufw allow 7881/tcp comment "WebRTC TCP"    2>/dev/null || true
-  ufw allow 7882/udp comment "WebRTC UDP"    2>/dev/null || true
-  ok "UFW: порты открыты"
-elif command -v firewall-cmd &>/dev/null; then
-  for p in 3000/tcp 7880/tcp 7881/tcp 7882/udp; do
-    firewall-cmd --permanent --add-port="$p" 2>/dev/null || true
-  done
-  firewall-cmd --reload; ok "firewalld: порты открыты"
-else
-  warn "Открой вручную: 3000/tcp, 7880/tcp, 7881/tcp, 7882/udp"
+# ── Firewall ─────────────────────────────────────────────────
+hdr "Firewall"
+ufw_rule() {
+  command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q active && ufw "$@" 2>/dev/null || true
+}
+ufw_rule allow 80/tcp  comment "HTTP (ACME)"
+ufw_rule allow 443/tcp comment "HTTPS"
+ufw_rule allow 7882/udp comment "WebRTC UDP"
+if [[ $DEV_MODE -eq 0 ]]; then
+  ufw_rule deny 3000 2>/dev/null || true
+  ufw_rule deny 7880 2>/dev/null || true
+  ufw_rule deny 7881 2>/dev/null || true
 fi
+ok "Порты настроены"
 
 # ── Итог ─────────────────────────────────────────────────────
 echo ""
 echo -e "${WHT}══════════════════════════════════════${NC}"
 echo -e "${GRN}  Готово!${NC}"
 echo -e "${WHT}══════════════════════════════════════${NC}"
-echo -e "  Веб-интерфейс : ${WHT}http://${PUBLIC_IP:-localhost}:3000${NC}"
+if [[ $DEV_MODE -eq 1 ]]; then
+  echo -e "  http://${DOMAIN}"
+else
+  echo -e "  ${GRN}https://${DOMAIN}${NC}  (TLS автоматически)"
+  echo ""
+  echo -e "${YEL}  DNS: A-запись должна указывать на этот сервер:${NC}"
+  echo -e "  ${DOMAIN}  →  A  →  ${PUBLIC_IP:-$(curl -s --max-time 3 https://ifconfig.me 2>/dev/null || echo '<IP>')}"
+fi
 echo ""
-echo -e "  journalctl -u vchat    -f"
-echo -e "  journalctl -u livekit  -f"
+echo "  journalctl -u vchat   -f"
+echo "  journalctl -u livekit -f"
+echo "  journalctl -u caddy   -f"
 echo ""

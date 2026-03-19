@@ -1,0 +1,53 @@
+# Caddyfile
+# Замени chat.example.com на свой домен
+# Caddy сам получит TLS-сертификат от Let's Encrypt
+
+{
+    # Глобальные настройки
+    email admin@example.com          # ← замени на свой email (уведомления Let's Encrypt)
+    admin off                        # отключаем admin API (не нужен в продакшне)
+}
+
+chat.example.com {                   # ← замени на свой домен
+
+    # ── Веб-интерфейс и API (vchat Rust) ─────────────────────
+    reverse_proxy /api/*  127.0.0.1:3000
+    reverse_proxy /       127.0.0.1:3000
+
+    # ── LiveKit WebSocket (wss://) ────────────────────────────
+    # Фронтенд подключается через /ws/ → Caddy → LiveKit :7880
+    reverse_proxy /ws/* 127.0.0.1:7880 {
+        header_up Host {upstream_hostport}
+        # Сохраняем WebSocket upgrade
+        header_up Connection {>Connection}
+        header_up Upgrade {>Upgrade}
+    }
+
+    # ── Security headers ──────────────────────────────────────
+    header {
+        # Запрещаем встраивание в iframe
+        X-Frame-Options "DENY"
+        # Браузер не угадывает MIME-тип
+        X-Content-Type-Options "nosniff"
+        # Реферер только внутри сайта
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # HSTS: HTTPS обязателен на год
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        # CSP: разрешаем LiveKit SDK с jsdelivr, WebSocket к нашему домену
+        Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' wss://chat.example.com; media-src 'self' blob:; img-src 'self' data:"
+        # Удаляем Server header
+        -Server
+    }
+
+    # ── Сжатие ────────────────────────────────────────────────
+    encode gzip
+
+    # ── Логи ──────────────────────────────────────────────────
+    log {
+        output file /var/log/caddy/vchat_access.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}
