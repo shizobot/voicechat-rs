@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -60,7 +60,8 @@ fn now_secs() -> u64 {
 fn random_jti() -> String {
     let mut buf = [0u8; 8];
     if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        let _ = f.read(&mut buf);
+        // читаем ровно 8 байт — read() может вернуть меньше
+        let _ = std::io::Read::read_exact(&mut f, &mut buf);
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -148,10 +149,19 @@ fn not_found() -> Response<std::io::Cursor<Vec<u8>>> {
     json_resp(404, serde_json::json!({ "error": "not found" }))
 }
 
-fn read_body(req: &mut tiny_http::Request) -> String {
+const MAX_BODY: usize = 8 * 1024; // 8 KB
+
+fn read_body(req: &mut tiny_http::Request) -> Option<String> {
+    let limit = req.body_length().unwrap_or(0);
+    if limit > MAX_BODY {
+        return None; // тело слишком большое
+    }
     let mut buf = String::new();
-    let _ = req.as_reader().read_to_string(&mut buf);
-    buf
+    let mut reader = req.as_reader().take(MAX_BODY as u64);
+    if reader.read_to_string(&mut buf).is_err() {
+        return None;
+    }
+    Some(buf)
 }
 
 // ── Комнаты ───────────────────────────────────────────────────
@@ -172,8 +182,13 @@ impl Rooms {
         map.keys().cloned().collect()
     }
 
-    fn add(&self, name: String) {
-        self.map.lock().unwrap().insert(name, now_secs());
+    fn add(&self, name: String) -> bool {
+        let mut map = self.map.lock().unwrap();
+        if map.len() >= 200 {
+            return false; // максимум 200 комнат
+        }
+        map.insert(name, now_secs());
+        true
     }
 }
 
@@ -206,10 +221,7 @@ fn handle(
 
         // ── GET /api/health ───────────────────────────────────
         (Method::Get, "/api/health") => {
-            json_resp(200, serde_json::json!({
-                "ok":  true,
-                "key": cfg.api_key
-            }))
+            json_resp(200, serde_json::json!({ "ok": true }))
         }
 
         // ── GET /api/rooms ────────────────────────────────────
@@ -220,7 +232,9 @@ fn handle(
 
         // ── POST /api/rooms ───────────────────────────────────
         (Method::Post, "/api/rooms") => {
-            let body = read_body(req);
+            let Some(body) = read_body(req) else {
+                return json_resp(413, serde_json::json!({ "error": "тело запроса слишком большое" }));
+            };
             let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
                 return json_resp(400, serde_json::json!({ "error": "invalid JSON" }));
             };
@@ -228,13 +242,17 @@ fn handle(
             if !valid_room(&name) {
                 return json_resp(400, serde_json::json!({ "error": "Некорректное название комнаты" }));
             }
-            rooms.add(name);
+            if !rooms.add(name) {
+                return json_resp(429, serde_json::json!({ "error": "слишком много комнат" }));
+            }
             json_resp(200, serde_json::json!({ "ok": true }))
         }
 
         // ── POST /api/token ───────────────────────────────────
         (Method::Post, "/api/token") => {
-            let body = read_body(req);
+            let Some(body) = read_body(req) else {
+                return json_resp(413, serde_json::json!({ "error": "тело запроса слишком большое" }));
+            };
             let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
                 return json_resp(400, serde_json::json!({ "error": "invalid JSON" }));
             };

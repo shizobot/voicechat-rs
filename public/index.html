@@ -239,9 +239,20 @@ async function loadRooms(){
     const r=await fetch('/api/rooms',{signal:ctrl.signal});
     clearTimeout(tid);
     const data=await r.json();
-    list.innerHTML=data.length
-      ? data.map(r=>`<div class="room-pill" onclick="qJoin('${r}')"><div class="live-dot"></div>${r}</div>`).join('')
-      : '<div class="hint">Нет активных комнат</div>';
+    if(data.length){
+      list.innerHTML='';
+      data.forEach(r=>{
+        const btn=document.createElement('div');
+        btn.className='room-pill';
+        btn.onclick=()=>qJoin(r);
+        const dot=document.createElement('div'); dot.className='live-dot';
+        btn.appendChild(dot);
+        btn.appendChild(document.createTextNode(r));
+        list.appendChild(btn);
+      });
+    } else {
+      list.innerHTML='<div class="hint">Нет активных комнат</div>';
+    }
   }catch{
     clearTimeout(tid);
     if(section) section.style.display='none';
@@ -319,12 +330,15 @@ function renderP(){
     const isMut=[...p.trackPublications.values()].some(pub=>pub.kind===Track.Kind.Audio&&pub.isMuted);
     const c=col(p.identity);
     const div=document.createElement('div'); div.className='participant'; div.id=`pp-${p.sid}`;
-    div.innerHTML=`<div class="p-avatar" style="background:${c}22;color:${c}">
-      ${ini(p.identity)}
-      <div class="p-mic ${isMut?'off':'on'}">${isMut?'🔇':'🎤'}</div>
-    </div>
-    <div class="p-name">${p.identity}</div>
-    ${isMe?'<div class="p-you">ты</div>':''}`;
+    const avatar=document.createElement('div');
+    avatar.className='p-avatar'; avatar.style.cssText=`background:${c}22;color:${c}`;
+    avatar.appendChild(document.createTextNode(ini(p.identity)));
+    const mic=document.createElement('div'); mic.className=`p-mic ${isMut?'off':'on'}`;
+    mic.textContent=isMut?'🔇':'🎤'; avatar.appendChild(mic);
+    const pname=document.createElement('div'); pname.className='p-name';
+    pname.textContent=p.identity;
+    div.appendChild(avatar); div.appendChild(pname);
+    if(isMe){const you=document.createElement('div');you.className='p-you';you.textContent='ты';div.appendChild(you);}
     el.appendChild(div);
   });
 }
@@ -426,20 +440,35 @@ function addMsg({id,author,text,time,mine}){
   const g=document.createElement('div');
   g.className=`msg-group${mine?' mine':''}${same?' same':''}`;
   g.dataset.msgId=id;
-  g.innerHTML=`<div class="msg-row">
-    ${!mine?`<div class="msg-avatar" style="background:${c}22;color:${c}">${same?'':ini(author)}</div>`:''}
-    <div class="msg-col">
-      ${!same?`<div class="msg-meta">
-        <span class="msg-author" style="color:${c}">${mine?'Ты':author}</span>
-        <span class="msg-time">${ts}</span>
-      </div>`:''}
-      <div class="msg-bubble">
-        <div class="msg-actions">${QR.map(e=>`<button class="act-btn" onclick="qReact('${id}','${e}')">${e}</button>`).join('')}</div>
-        ${esc(text)}
-      </div>
-      <div class="msg-reactions" id="rr-${id}"></div>
-    </div>
-  </div>`;
+  const row=document.createElement('div'); row.className='msg-row';
+  if(!mine){
+    const av=document.createElement('div'); av.className='msg-avatar';
+    av.style.cssText=`background:${c}22;color:${c}`;
+    if(!same) av.textContent=ini(author);
+    row.appendChild(av);
+  }
+  const col2=document.createElement('div'); col2.className='msg-col';
+  if(!same){
+    const meta=document.createElement('div'); meta.className='msg-meta';
+    const span1=document.createElement('span'); span1.className='msg-author';
+    span1.style.color=c; span1.textContent=mine?'Ты':author;
+    const span2=document.createElement('span'); span2.className='msg-time';
+    span2.textContent=ts;
+    meta.appendChild(span1); meta.appendChild(span2); col2.appendChild(meta);
+  }
+  const bubble=document.createElement('div'); bubble.className='msg-bubble';
+  const actions=document.createElement('div'); actions.className='msg-actions';
+  QR.forEach(e=>{
+    const btn=document.createElement('button'); btn.className='act-btn';
+    btn.textContent=e; btn.onclick=()=>qReact(id,e); actions.appendChild(btn);
+  });
+  bubble.appendChild(actions);
+  const textNode=document.createElement('span');
+  textNode.innerHTML=esc(text);
+  bubble.appendChild(textNode);
+  const reacts=document.createElement('div'); reacts.className='msg-reactions'; reacts.id=`rr-${id}`;
+  col2.appendChild(bubble); col2.appendChild(reacts);
+  row.appendChild(col2); g.appendChild(row);
   document.getElementById('msgs').appendChild(g); scrollB();
 }
 
@@ -471,7 +500,12 @@ function clrTyp(name){ tyUsers.delete(name); delete tyTOs[name]; rndTyp(); }
 function rndTyp(){
   const bar=document.getElementById('tbar');
   if(!tyUsers.size){bar.innerHTML='';return}
-  bar.innerHTML=`<span style="margin-right:.35rem">${[...tyUsers].join(', ')} печатает</span><span class="tdots"><span></span><span></span><span></span></span>`;
+  bar.textContent='';
+  const span=document.createElement('span'); span.style.marginRight='.35rem';
+  span.textContent=[...tyUsers].join(', ')+' печатает';
+  const dots=document.createElement('span'); dots.className='tdots';
+  dots.innerHTML='<span></span><span></span><span></span>';
+  bar.appendChild(span); bar.appendChild(dots);
 }
 
 function togEmoji(){
