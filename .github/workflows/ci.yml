@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            token-server/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('token-server/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build (release)
+        working-directory: token-server
+        run: cargo build --release
+
+      - name: Clippy
+        working-directory: token-server
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        working-directory: token-server
+        run: cargo test
+
+      - name: Check binary size
+        working-directory: token-server
+        run: |
+          SIZE=$(du -sh target/release/vchat | cut -f1)
+          echo "Binary size: $SIZE"

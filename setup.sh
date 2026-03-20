@@ -153,6 +153,8 @@ ${DOMAIN} {
         X-Content-Type-Options "nosniff"
         Referrer-Policy "strict-origin-when-cross-origin"
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' wss://${DOMAIN}; media-src 'self' blob:; img-src 'self' data:"
+        Permissions-Policy "camera=(), geolocation=(), payment=()"
         -Server
     }
 

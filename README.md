@@ -1,76 +1,75 @@
-# VoiceChat
+# VoiceChat-RS
 
-Голосовой + текстовый групповой чат. Два процесса, ноль зависимостей в рантайме.
+Голосовой + текстовый групповой чат для своих. Два статических бинарника, никакого Docker.
 
 ## Стек
 
-| Процесс | Что делает | Технология |
-|---------|-----------|------------|
-| `vchat` | Веб-интерфейс + API | Rust, один статический бинарник |
-| `livekit-server` | WebRTC SFU, голос, DataChannel | Go, один статический бинарник |
+| Процесс | Описание | Порт |
+|---------|----------|------|
+| `vchat` | Rust: HTTP API + статика | 3000 (внутренний) |
+| `livekit-server` | Go: WebRTC SFU, голос, DataChannel | 7880 WS, 7882 UDP |
+| `caddy` | TLS termination + reverse proxy | 443 |
+
+## Быстрый старт
+
+```bash
+sudo bash setup.sh chat.example.com admin@example.com
+```
+
+Dev-режим (без TLS):
+```bash
+sudo bash setup.sh localhost dev@local.dev
+```
 
 ## API
 
 | Метод | Путь | Тело | Ответ |
 |-------|------|------|-------|
-| `GET` | `/` | — | `index.html` |
-| `GET` | `/api/rooms` | — | `["room1", "room2"]` |
-| `POST` | `/api/rooms` | `{"name":"general"}` | `{"ok":true}` |
-| `POST` | `/api/token` | `{"room":"general","username":"Маркос"}` | `{"token":"..."}` |
-| `GET` | `/api/health` | — | `{"ok":true}` |
+| `GET` | `/` | — | index.html |
+| `GET` | `/api/config` | — | `{livekit_url, version}` |
+| `GET` | `/api/rooms` | — | `[{name, count}]` |
+| `POST` | `/api/rooms` | `{name}` | `{ok}` |
+| `POST` | `/api/check-nick` | `{room, username}` | `{available}` |
+| `POST` | `/api/token` | `{room, username, avatar}` | `{token}` |
+| `POST` | `/api/leave` | `{room, username}` | 204 |
+| `GET` | `/api/health` | — | `{ok}` |
 
-## Установка
+## Переменные окружения
 
-```bash
-sudo bash setup.sh
-```
-
-## Ручная сборка
-
-```bash
-cd token-server
-cargo build --release
-# → target/release/vchat
-```
-
-## Запуск вручную
-
-```bash
-# Переменные окружения
-export LIVEKIT_API_KEY=vchat_key
-export LIVEKIT_API_SECRET=$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
-export STATIC_DIR=./public
-export PORT=3000
-
-# Бэкенд
-./target/release/vchat &
-
-# LiveKit (отдельный терминал)
-./livekit-server --config livekit.yaml
-```
+| Переменная | Обязательная | Описание |
+|------------|-------------|----------|
+| `LIVEKIT_API_SECRET` | ✅ Да (≥32 символов) | Секрет для подписи JWT |
+| `LIVEKIT_API_KEY` | Нет | API ключ (default: vchat_key) |
+| `LIVEKIT_URL` | Нет | ws:// или wss:// URL LiveKit |
+| `ALLOWED_ORIGIN` | Нет | CORS origin (default: *) |
+| `STATIC_DIR` | Нет | Путь к public/ (default: ./public) |
+| `PORT` | Нет | HTTP порт (default: 3000) |
+| `HOST` | Нет | Bind address (default: 127.0.0.1) |
 
 ## Управление
 
 ```bash
-systemctl status vchat livekit
-journalctl -u vchat   -f    # логи бэкенда
-journalctl -u livekit -f    # логи SFU
-
+systemctl status vchat livekit caddy
+journalctl -u vchat   -f
+journalctl -u livekit -f
+journalctl -u caddy   -f
 systemctl restart vchat
-systemctl restart livekit
 ```
 
-## Порты
+## Порты (продакшн)
 
-| Порт | Протокол | Назначение |
-|------|----------|------------|
-| 3000 | TCP | Веб + API (`vchat`) |
-| 7880 | TCP | LiveKit WebSocket |
-| 7881 | TCP | WebRTC TCP fallback |
-| **7882** | **UDP** | **WebRTC голос** |
+| Порт | Протокол | Открыт? | Назначение |
+|------|----------|---------|------------|
+| 80 | TCP | ✅ | Let's Encrypt ACME |
+| 443 | TCP | ✅ | HTTPS (Caddy) |
+| 7882 | **UDP** | ✅ | WebRTC голос |
+| 3000 | TCP | ❌ | vchat (только localhost) |
+| 7880 | TCP | ❌ | LiveKit WS (только localhost) |
+| 7881 | TCP | ❌ | WebRTC TCP (только localhost) |
 
-## NAT
+## NAT и домен
 
 ```bash
-bash nat-diag.sh
+bash nat-diag.sh     # диагностика NAT
+cat DNS_SETUP.md     # инструкция по домену
 ```

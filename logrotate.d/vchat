@@ -1,0 +1,12 @@
+/opt/vchat/log/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 nobody nogroup
+    postrotate
+        systemctl reload vchat livekit 2>/dev/null || true
+    endscript
+}

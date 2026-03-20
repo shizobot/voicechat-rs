@@ -73,7 +73,7 @@ fn make_jwt(payload: &serde_json::Value, secret: &str) -> String {
     let header = b64(br#"{"alg":"HS256","typ":"JWT"}"#);
     let body   = b64(payload.to_string().as_bytes());
     let msg    = format!("{header}.{body}");
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("secret must not be empty");
     mac.update(msg.as_bytes());
     format!("{msg}.{}", b64(&mac.finalize().into_bytes()))
 }
@@ -173,6 +173,7 @@ impl Rooms {
         let cutoff = now_secs().saturating_sub(12 * 3600);
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, r| r.created_at > cutoff);
+        // NOTE: expired room entries also removed from Nicks in register()
         let mut list: Vec<_> = map.iter()
             .map(|(k, v)| serde_json::json!({"name": k, "count": v.count}))
             .collect();
@@ -251,6 +252,7 @@ struct State {
     rate_tok:   RateLimit,
     rate_room:  RateLimit,
     rate_check: RateLimit,
+    rate_leave: RateLimit,
 }
 
 fn handle(req: &mut tiny_http::Request, method: &Method, path: &str, ip: &str, s: &State)
@@ -352,7 +354,7 @@ fn handle(req: &mut tiny_http::Request, method: &Method, path: &str, ip: &str, s
         },
 
         (Method::Post, "/api/leave") => {
-            // Клиент сообщает что вышел → освобождаем ник и декрементируем счётчик
+            if !s.rate_leave.check(ip, 20, 60) { return empty(429); }
             let Some(body) = read_body(req) else { return empty(204); };
             if let Ok(j) = serde_json::from_str::<serde_json::Value>(&body) {
                 let room = j["room"].as_str().unwrap_or("").trim().to_owned();
@@ -385,9 +387,14 @@ fn main() {
         rate_tok:   RateLimit::new(),
         rate_room:  RateLimit::new(),
         rate_check: RateLimit::new(),
+        rate_leave: RateLimit::new(),
     });
 
     let addr = format!("{}:{}", state.cfg.host, state.cfg.port);
+    if state.cfg.api_secret == "change_me_in_production" || state.cfg.api_secret.len() < 32 {
+        eprintln!("[ERROR] LIVEKIT_API_SECRET слишком короткий или не задан (минимум 32 символа)");
+        std::process::exit(1);
+    }
     if !state.cfg.static_dir.exists() {
         eprintln!("[WARN] static dir not found: {:?}", state.cfg.static_dir);
     }

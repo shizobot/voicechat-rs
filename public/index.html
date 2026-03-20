@@ -415,7 +415,7 @@ const AV_COLORS=[
 const AV_ICONS=['🐺','🦊','🐻','🐼','🐨','🦁','🐯','🐮','🐸','🦋','🐬','🦅','🦉','🐙','🦊','🐉'];
 const LS_AV='vchat_avatar', LS_NICK='vchat_nick';
 
-let selAvatar = parseInt(localStorage.getItem(LS_AV)||'0') % 16;
+let selAvatar = Math.max(0, parseInt(localStorage.getItem(LS_AV)||'0') || 0) % 16;
 let selRoom   = '';
 let nickTimer = null, nickOk = false;
 
@@ -468,13 +468,24 @@ async function loadChannels(){
         card.onclick=()=>selectChannel(name);
         const idx=name.split('').reduce((h,c)=>(h*31+c.charCodeAt(0))&0x7fffffff,0)%16;
         const c=AV_COLORS[idx];
-        card.innerHTML=`
-          <div class="ch-icon" style="background:${c}22;color:${c}">${AV_ICONS[idx]}</div>
-          <div class="ch-info">
-            <div class="ch-name">${name}</div>
-            <div class="ch-meta">${count>0?`<div class="ch-dot"></div>${count} онлайн`:'пусто'}</div>
-          </div>
-          <div class="ch-arrow">›</div>`;
+        // [C1 fix] DOM API — no innerHTML with server data
+        const icon=document.createElement('div');icon.className='ch-icon';
+        icon.style.cssText=`background:${c}22;color:${c}`;
+        icon.textContent=AV_ICONS[idx];
+        const info=document.createElement('div');info.className='ch-info';
+        const cname=document.createElement('div');cname.className='ch-name';
+        cname.textContent=name;
+        const cmeta=document.createElement('div');cmeta.className='ch-meta';
+        if(count>0){
+          const dot=document.createElement('div');dot.className='ch-dot';
+          cmeta.appendChild(dot);
+          cmeta.appendChild(document.createTextNode(count+' онлайн'));
+        } else {
+          cmeta.textContent='пусто';
+        }
+        const arrow=document.createElement('div');arrow.className='ch-arrow';arrow.textContent='›';
+        info.appendChild(cname);info.appendChild(cmeta);
+        card.appendChild(icon);card.appendChild(info);card.appendChild(arrow);
         list.appendChild(card);
       });
     }
@@ -533,13 +544,17 @@ function onNickInput(){
   nickTimer=setTimeout(checkNick,400);
 }
 
+let _checkNickCtrl=null;
 async function checkNick(){
   const v=document.getElementById('inp-nick').value.trim();
   if(!v||!selRoom){return}
+  if(_checkNickCtrl){_checkNickCtrl.abort()}
+  _checkNickCtrl=new AbortController();
   try{
     const r=await fetch('/api/check-nick',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({room:selRoom,username:v})
+      body:JSON.stringify({room:selRoom,username:v}),
+      signal:_checkNickCtrl.signal
     });
     const d=await r.json();
     if(d.available){
@@ -579,7 +594,9 @@ async function doJoin(){
     });
     const d=await r.json();
     if(!r.ok){
-      err.textContent=d.error||'Ошибка';err.style.display='block';
+      const msg=r.status===409?'Ник только что заняли — выбери другой':d.error||'Ошибка';
+      if(r.status===409){setNickSt('занят','err');nickOk=false;checkJoinReady();}
+      err.textContent=msg;err.style.display='block';
       btn.disabled=false;btn.classList.remove('loading');btn.textContent='Войти';return;
     }
     myName=nick;myRoom=selRoom;myAvatar=selAvatar;
@@ -662,6 +679,7 @@ async function connect(token){
   await room.localParticipant.setMicrophoneEnabled(true);
   dbg('ok','Микрофон включён');
 
+  clearInterval(_channelsInterval);
   document.getElementById('lobby').style.display='none';
   document.getElementById('app').style.display='flex';
   document.getElementById('tb-rname').textContent=myRoom;
@@ -719,7 +737,8 @@ function setVol(v){
 
 async function notifyLeave(){
   if(!myName||!myRoom)return;
-  navigator.sendBeacon('/api/leave',JSON.stringify({room:myRoom,username:myName}));
+  const blob=new Blob([JSON.stringify({room:myRoom,username:myName})],{type:'application/json'});
+  navigator.sendBeacon('/api/leave',blob);
 }
 
 async function doLeave(){
@@ -737,6 +756,7 @@ function onDisc(){
   document.querySelectorAll('audio').forEach(a=>a.remove());
   window.removeEventListener('beforeunload',notifyLeave);
   loadChannels();
+  _channelsInterval=setInterval(loadChannels,15000);
   // Сбросить ник-статус
   nickOk=false;checkJoinReady();
   setNickSt('','');
@@ -911,7 +931,7 @@ document.addEventListener('keydown',e=>{
 buildAvatarGrid();
 loadChannels();
 parseUrl();
-setInterval(loadChannels,15000); // обновляем список каналов каждые 15 сек
+let _channelsInterval = setInterval(loadChannels,15000);
 </script>
 </body>
 </html>
