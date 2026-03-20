@@ -49,6 +49,11 @@ pushd "$SCRIPT_DIR/token-server" > /dev/null
 sudo -u "$REAL_USER" "$CARGO" build --release 2>&1 | grep -E "^error|Compiling vchat|Finished" || true
 [[ -f "target/release/vchat" ]] || fail "Сборка не удалась"
 ok "$(du -sh target/release/vchat | cut -f1)"
+# [H1] Коммитим Cargo.lock для воспроизводимых сборок
+if [[ ! -f "$SCRIPT_DIR/token-server/Cargo.lock" ]]; then
+  warn "Cargo.lock не найден в репо — добавь его для воспроизводимых сборок:"
+  warn "  git add token-server/Cargo.lock && git commit -m 'chore: add Cargo.lock'"
+fi
 popd > /dev/null
 
 # ── LiveKit ──────────────────────────────────────────────────
@@ -152,7 +157,7 @@ ${DOMAIN} {
         X-Frame-Options "DENY"
         X-Content-Type-Options "nosniff"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' wss://${DOMAIN}; media-src 'self' blob:; img-src 'self' data:"
         Permissions-Policy "camera=(), geolocation=(), payment=()"
         -Server

@@ -40,6 +40,13 @@ jobs:
         working-directory: token-server
         run: cargo test
 
+      - name: Warn if Cargo.lock missing
+        working-directory: token-server
+        run: |
+          if [ ! -f Cargo.lock ]; then
+            echo "::warning::Cargo.lock not committed — builds may not be reproducible"
+          fi
+
       - name: Check binary size
         working-directory: token-server
         run: |

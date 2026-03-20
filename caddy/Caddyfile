@@ -33,7 +33,7 @@ chat.example.com {                   # ← замени на свой домен
         # Реферер только внутри сайта
         Referrer-Policy "strict-origin-when-cross-origin"
         # HSTS: HTTPS обязателен на год
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         # CSP: разрешаем LiveKit SDK с jsdelivr, WebSocket к нашему домену
         Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' wss://chat.example.com; media-src 'self' blob:; img-src 'self' data:"
         Permissions-Policy "camera=(), geolocation=(), payment=()"

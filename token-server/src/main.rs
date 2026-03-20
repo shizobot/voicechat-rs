@@ -158,8 +158,17 @@ fn read_body(req: &mut tiny_http::Request) -> Option<String> {
 
 // ── Rooms ─────────────────────────────────────────────────────
 struct RoomInfo {
-    created_at: u64,
-    count:      u32,   // активных участников (приблизительно)
+    created_at:    u64,
+    // Храним время истечения каждого токена — точный счётчик без race condition
+    // Токен живёт 4 часа, поэтому exp = issued_at + 4*3600
+    token_expiries: Vec<u64>,
+}
+
+impl RoomInfo {
+    fn active_count(&self) -> usize {
+        let now = now_secs();
+        self.token_expiries.iter().filter(|&&e| e > now).count()
+    }
 }
 
 struct Rooms {
@@ -172,10 +181,15 @@ impl Rooms {
     fn list(&self) -> Vec<serde_json::Value> {
         let cutoff = now_secs().saturating_sub(12 * 3600);
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        map.retain(|_, r| r.created_at > cutoff);
-        // NOTE: expired room entries also removed from Nicks in register()
-        let mut list: Vec<_> = map.iter()
-            .map(|(k, v)| serde_json::json!({"name": k, "count": v.count}))
+        // Удаляем комнаты старше 12 часов без активных токенов
+        map.retain(|_, r| r.created_at > cutoff || r.active_count() > 0);
+        let mut list: Vec<_> = map.iter_mut()
+            .map(|(k, v)| {
+                // Чистим истёкшие токены заодно
+                let now = now_secs();
+                v.token_expiries.retain(|&e| e > now);
+                serde_json::json!({"name": k, "count": v.active_count()})
+            })
             .collect();
         list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         list
@@ -184,18 +198,19 @@ impl Rooms {
     fn add(&self, name: String) -> bool {
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= 200 { return false; }
-        map.entry(name).or_insert(RoomInfo { created_at: now_secs(), count: 0 });
+        map.entry(name).or_insert(RoomInfo { created_at: now_secs(), token_expiries: Vec::new() });
         true
     }
 
-    fn inc(&self, name: &str) {
+    // Регистрируем токен с временем истечения — счётчик точный без race condition
+    fn register_token(&self, name: &str, expiry: u64) {
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = map.get_mut(name) { r.count = r.count.saturating_add(1); }
-    }
-
-    fn dec(&self, name: &str) {
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = map.get_mut(name) { r.count = r.count.saturating_sub(1); }
+        if let Some(r) = map.get_mut(name) {
+            // Чистим истёкшие перед добавлением
+            let now = now_secs();
+            r.token_expiries.retain(|&e| e > now);
+            r.token_expiries.push(expiry);
+        }
     }
 }
 
@@ -345,9 +360,10 @@ fn handle(req: &mut tiny_http::Request, method: &Method, path: &str, ip: &str, s
                 return json_resp(409, serde_json::json!({"error":"ник занят"}), o);
             }
 
+            let token_expiry = now_secs() + 4 * 3600;
             s.nicks.register(&room, &username, avatar);
             s.rooms.add(room.clone());
-            s.rooms.inc(&room);
+            s.rooms.register_token(&room, token_expiry);
 
             let token = build_token(&s.cfg, &room, &username, avatar);
             json_resp(200, serde_json::json!({"token": token}), o)
@@ -368,7 +384,7 @@ fn handle(req: &mut tiny_http::Request, method: &Method, path: &str, ip: &str, s
                         }
                     }
                     drop(map);
-                    s.rooms.dec(&room);
+                    // Счётчик основан на TTL токенов — dec не нужен
                 }
             }
             empty(204)
